@@ -996,13 +996,14 @@ _CONFIGS = [
             use_delta_actions=True,
             delta_action_dims=5,  # 5 joint dims, leave gripper absolute
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        # Train from scratch - pi05_base expects 32-dim actions
+        weight_loader=weight_loaders.NoOpWeightLoader(),
         batch_size=32,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=300,
-            peak_lr=5e-5,
+            peak_lr=1e-4,  # Higher LR for training from scratch
             decay_steps=3000,
-            decay_lr=5e-5,
+            decay_lr=1e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
