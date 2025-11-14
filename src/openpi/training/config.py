@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.lerobot_policy as lerobot_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -176,8 +177,13 @@ class DataConfigFactory(abc.ABC):
         """Create a data config."""
 
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        import os
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
-        asset_id = self.assets.asset_id or repo_id
+        # For local paths, use the directory name as asset_id
+        if repo_id and os.path.exists(repo_id):
+            asset_id = self.assets.asset_id or os.path.basename(os.path.abspath(repo_id))
+        else:
+            asset_id = self.assets.asset_id or repo_id
         return dataclasses.replace(
             self.base_config or DataConfig(),
             repo_id=repo_id,
@@ -351,6 +357,63 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotGenericDataConfig(DataConfigFactory):
+    """
+    Generic config for custom LeRobot datasets. This config allows you to specify custom camera
+    and observation key mappings for your dataset.
+    """
+
+    # Default prompt to use if not provided in the dataset
+    default_prompt: str | None = None
+    # Whether to use delta actions (set to True if your dataset has absolute actions)
+    use_delta_actions: bool = False
+    # Number of joint dimensions to apply delta conversion to (e.g., 6 for joints, leave gripper absolute)
+    delta_action_dims: int | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Repack transform to map dataset keys to policy keys
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.scene",
+                        "observation/wrist_image": "observation.images.gripper",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Data transforms using the lerobot_policy transforms
+        data_transforms = _transforms.Group(
+            inputs=[lerobot_policy.LerobotInputs(model_type=model_config.model_type)],
+            outputs=[lerobot_policy.LerobotOutputs()],
+        )
+
+        # Optionally add delta action conversion
+        if self.use_delta_actions and self.delta_action_dims is not None:
+            delta_action_mask = _transforms.make_bool_mask(self.delta_action_dims, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        # Model transforms
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            prompt_from_task=True,
         )
 
 
@@ -920,6 +983,31 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    #
+    # Custom LeRobot dataset configs.
+    #
+    TrainConfig(
+        name="pi05_pick",
+        model=pi0_config.Pi0Config(pi05=True, action_dim=6, action_horizon=10, discrete_state_input=False),
+        data=LeRobotGenericDataConfig(
+            repo_id="/root/pick-11-14",
+            default_prompt="pick object",
+            use_delta_actions=True,
+            delta_action_dims=5,  # 5 joint dims, leave gripper absolute
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        batch_size=32,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=300,
+            peak_lr=5e-5,
+            decay_steps=3000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        num_train_steps=3000,
+        wandb_enabled=True,
     ),
     #
     # Debugging configs.

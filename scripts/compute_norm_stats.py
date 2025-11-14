@@ -108,7 +108,14 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    # For local paths, use the directory name instead of the full path
+    import os
+    if os.path.exists(data_config.repo_id):
+        asset_name = os.path.basename(os.path.abspath(data_config.repo_id))
+    else:
+        asset_name = data_config.repo_id
+
+    output_path = config.assets_dirs / asset_name
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 
