@@ -159,9 +159,19 @@ class SimpleLeRobotDatasetMetadata:
 
         # Load tasks
         self.tasks = {}
-        tasks_file = self.root / "meta" / "tasks.jsonl"
-        if tasks_file.exists():
-            with open(tasks_file) as f:
-                for line in f:
-                    task = json.loads(line)
-                    self.tasks[task["task_index"]] = task.get("task", "")
+        # Try tasks.parquet first (newer format)
+        tasks_parquet = self.root / "meta" / "tasks.parquet"
+        if tasks_parquet.exists():
+            tasks_df = pd.read_parquet(tasks_parquet)
+            # The parquet format has task strings as index and task_index as column
+            for task_str, row in tasks_df.iterrows():
+                task_index = int(row["task_index"])
+                self.tasks[task_index] = task_str
+        else:
+            # Fall back to tasks.jsonl (older format)
+            tasks_file = self.root / "meta" / "tasks.jsonl"
+            if tasks_file.exists():
+                with open(tasks_file) as f:
+                    for line in f:
+                        task = json.loads(line)
+                        self.tasks[task["task_index"]] = task.get("task", "")
