@@ -31,12 +31,47 @@ class SimpleLeRobotDataset:
         self.fps = self.info["fps"]
         self.delta_timestamps = delta_timestamps or {}
 
-        # Cache for video frames (limit size to avoid OOM)
-        self._video_cache = {}
-        self._max_cache_size = 5  # Only cache 5 videos at a time
+        # Preload all video frames into memory
+        print("Loading all video frames into memory...")
+        self._video_frames = self._preload_all_videos()
+        print(f"Loaded {len(self._video_frames)} video frames")
 
         # Precompute indices for action sequences
         self._prepare_action_sequences()
+
+    def _preload_all_videos(self) -> dict:
+        """Preload all video frames into memory."""
+        video_frames = {}
+
+        # Get all video keys from info
+        video_keys = []
+        for feature_name, feature_info in self.info["features"].items():
+            if feature_info.get("dtype") == "video":
+                video_keys.append(feature_name)
+
+        # Load all frames for each video key
+        for video_key in video_keys:
+            video_dir = self.root / "videos" / video_key
+            for episode_idx in self.data["episode_index"].unique():
+                chunk_idx = episode_idx // self.info["chunks_size"]
+                file_idx = (episode_idx % self.info["chunks_size"]) // 1000
+
+                video_path = video_dir / f"chunk-{chunk_idx:03d}" / f"file-{file_idx:03d}.mp4"
+
+                if not video_path.exists():
+                    continue
+
+                # Load all frames for this episode
+                container = av.open(str(video_path))
+                frames = []
+                for frame in container.decode(video=0):
+                    frames.append(frame.to_ndarray(format='rgb24'))
+                container.close()
+
+                # Store frames indexed by (video_key, episode_idx)
+                video_frames[(video_key, episode_idx)] = frames
+
+        return video_frames
 
     def _prepare_action_sequences(self):
         """Prepare indices for loading action sequences."""
@@ -56,29 +91,12 @@ class SimpleLeRobotDataset:
                 self.valid_indices.append(episode_indices[i])
 
     def _load_video_frame(self, video_key: str, episode_idx: int, frame_idx: int) -> np.ndarray:
-        """Load a single frame from video."""
-        # Find the correct chunk
-        chunk_idx = episode_idx // self.info["chunks_size"]
-        file_idx = (episode_idx % self.info["chunks_size"]) // 1000
+        """Load a single frame from preloaded video frames."""
+        frames = self._video_frames.get((video_key, episode_idx))
 
-        video_path = self.root / "videos" / video_key / f"chunk-{chunk_idx:03d}" / f"file-{file_idx:03d}.mp4"
+        if frames is None:
+            raise ValueError(f"No frames found for {video_key}, episode {episode_idx}")
 
-        cache_key = (str(video_path), episode_idx)
-        if cache_key not in self._video_cache:
-            # Limit cache size
-            if len(self._video_cache) >= self._max_cache_size:
-                # Remove oldest entry
-                self._video_cache.pop(next(iter(self._video_cache)))
-
-            # Load all frames for this episode
-            container = av.open(str(video_path))
-            frames = []
-            for frame in container.decode(video=0):
-                frames.append(frame.to_ndarray(format='rgb24'))
-            container.close()
-            self._video_cache[cache_key] = frames
-
-        frames = self._video_cache[cache_key]
         # Get the frame at the correct index within the episode
         episode_data = self.data[self.data["episode_index"] == episode_idx]
         local_frame_idx = (episode_data["frame_index"] == frame_idx).idxmax()
